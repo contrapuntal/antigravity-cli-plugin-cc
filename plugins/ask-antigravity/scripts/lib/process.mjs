@@ -164,12 +164,20 @@ export function captureCommand(command, args = [], options = {}) {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      // Own process group (POSIX) so a timeout can kill the entire tree, not
+      // just the direct child. Grandchildren that inherited the stdout/stderr
+      // pipe would otherwise keep it open, delaying 'close' (and temp-dir
+      // cleanup) until they exit. Does not change how we read the pipes here.
+      detached: process.platform !== "win32"
     });
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let settled = false;
+    let killTimer = null;
+    let deadlineTimer = null;
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
@@ -177,21 +185,46 @@ export function captureCommand(command, args = [], options = {}) {
       stderr += chunk;
     });
 
-    let timer = null;
+    // Single settle point so the timeout backstop and the 'close' event can't
+    // both resolve, and every timer is cleared exactly once.
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      resolve(result);
+    }
+
     if (options.timeoutMs && options.timeoutMs > 0) {
-      timer = setTimeout(() => {
+      killTimer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        killProcessTree(child);
+        // Backstop: if a stray descendant still holds a pipe open, 'close' may
+        // never fire. Destroy the streams and settle anyway after a short grace
+        // so a wedged process can't hang the caller forever.
+        deadlineTimer = setTimeout(() => {
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish({
+            status: 128 + signalNumber("SIGKILL"),
+            signal: "SIGKILL",
+            stdout: cleanOutput(stdout),
+            stderr,
+            timedOut: true
+          });
+        }, options.killGraceMs ?? 2000);
       }, options.timeoutMs);
     }
 
     child.on("error", (error) => {
-      if (timer) clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
       reject(error);
     });
     child.on("close", (code, signal) => {
-      if (timer) clearTimeout(timer);
-      resolve({
+      finish({
         status: signal ? 128 + signalNumber(signal) : (code ?? 0),
         signal: signal ?? null,
         stdout: cleanOutput(stdout),
@@ -200,6 +233,25 @@ export function captureCommand(command, args = [], options = {}) {
       });
     });
   });
+}
+
+// Kill a child and any descendants it spawned. On POSIX the child is a process-
+// group leader (spawned detached), so a negative PID signals the whole group.
+// Falls back to a direct kill if the group is already gone or on Windows.
+function killProcessTree(child) {
+  try {
+    if (process.platform === "win32") {
+      child.kill("SIGKILL");
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited — nothing to kill.
+    }
+  }
 }
 
 function signalNumber(signal) {

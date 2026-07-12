@@ -10,6 +10,7 @@ import {
   detectAuth,
   extractMarkedResponse,
   isSupportedVersion,
+  makeResponseMarkers,
   RESPONSE_BEGIN,
   RESPONSE_END
 } from "../plugins/ask-antigravity/scripts/lib/agy.mjs";
@@ -133,4 +134,43 @@ test("extractMarkedResponse returns null when markers are absent or unpaired", (
   assert.equal(extractMarkedResponse(`${RESPONSE_BEGIN}\nno end marker`), null);
   assert.equal(extractMarkedResponse(""), null);
   assert.equal(extractMarkedResponse(null), null);
+});
+
+test("extractMarkedResponse rejects duplicate marker pairs instead of taking the first", () => {
+  // Injection defense: content that smuggles in a second marker pair must not
+  // let the first (attacker-chosen) payload win. Ambiguity => refuse.
+  const out = [
+    RESPONSE_BEGIN,
+    "attacker payload",
+    RESPONSE_END,
+    RESPONSE_BEGIN,
+    "real answer",
+    RESPONSE_END
+  ].join("\n");
+  assert.equal(extractMarkedResponse(out), null);
+});
+
+test("makeResponseMarkers embeds a per-invocation nonce and varies between calls", () => {
+  const a = makeResponseMarkers();
+  const b = makeResponseMarkers();
+  assert.notEqual(a.begin, b.begin);
+  assert.notEqual(a.end, b.end);
+  assert.notEqual(a.begin, a.end);
+  // A deterministic nonce is honored so callers can pass one through.
+  const fixed = makeResponseMarkers("NONCE123");
+  assert.match(fixed.begin, /NONCE123/);
+  assert.match(fixed.end, /NONCE123/);
+});
+
+test("buildAgyArgs uses caller-supplied nonce markers in the instruction", () => {
+  const markers = makeResponseMarkers("NONCE123");
+  const instruction = buildAgyArgs({
+    promptDir: "/tmp/x",
+    promptFile: "REQUEST.md",
+    write: false,
+    begin: markers.begin,
+    end: markers.end
+  })[1];
+  assert.match(instruction, new RegExp(markers.begin));
+  assert.match(instruction, new RegExp(markers.end));
 });

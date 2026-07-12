@@ -83,23 +83,44 @@ export function installHint() {
 // agy is agentic: in print mode it narrates its tool-use steps ("I will read
 // REQUEST.md...") before the actual answer, and a plain "no preamble" request
 // does not suppress that. So we have agy wrap its real response between two
-// unique marker lines and extract only that region (see extractMarkedResponse),
+// marker lines and extract only that region (see extractMarkedResponse),
 // which leaves the narration outside the markers and discarded.
+//
+// These base constants are the fallback/template; each real invocation uses
+// per-call NONCE markers (makeResponseMarkers) so content under review cannot
+// forge a marker line to truncate or replace the answer.
 export const RESPONSE_BEGIN = "===AGY-RESPONSE-BEGIN===";
 export const RESPONSE_END = "===AGY-RESPONSE-END===";
+
+// Build per-invocation marker lines carrying an unguessable nonce. A fixed
+// marker could be echoed by a reviewed file (or agy narration) to hijack
+// extraction; a random nonce per call closes that.
+export function makeResponseMarkers(nonce = randomUUID()) {
+  return {
+    begin: `===AGY-RESPONSE-BEGIN-${nonce}===`,
+    end: `===AGY-RESPONSE-END-${nonce}===`
+  };
+}
 
 // Build agy argv for an invocation. The prompt body is NOT here — it lives in
 // `promptFile` inside `promptDir` (added via --add-dir); the -p instruction is a
 // short fixed string, so prompt size never approaches the argv limit. `model`
 // is a display name from `agy models` (print-mode --model exists on agy >= 1.0.5;
 // our minimum is 1.0.7 anyway).
-export function buildAgyArgs({ promptDir, promptFile, write, model }) {
+export function buildAgyArgs({
+  promptDir,
+  promptFile,
+  write,
+  model,
+  begin = RESPONSE_BEGIN,
+  end = RESPONSE_END
+}) {
   const args = [
     "-p",
     `Read the file ${promptFile} in the added workspace directory and do exactly what it asks. ` +
-      `Then output a line containing only ${RESPONSE_BEGIN}, then your complete response, then a ` +
-      `line containing only ${RESPONSE_END}. Put nothing other than your response between those ` +
-      `marker lines, and output nothing after ${RESPONSE_END}.`,
+      `Then output a line containing only ${begin}, then your complete response, then a ` +
+      `line containing only ${end}. Put nothing other than your response between those ` +
+      `marker lines, and output nothing after ${end}.`,
     "--add-dir",
     promptDir,
     "--print-timeout",
@@ -110,40 +131,57 @@ export function buildAgyArgs({ promptDir, promptFile, write, model }) {
   }
   if (write) {
     // Auto-approve tool use so write tasks don't stall on a permission prompt.
+    //
+    // IMPORTANT: this flag is NOT a capability boundary. Omitting it does not
+    // make the run read-only — on agy 1.1.1, headless print mode will happily
+    // edit files with no flag at all (verified: omitting this flag, --mode plan,
+    // and --sandbox all still wrote). It only affects prompt auto-approval,
+    // which is moot when there is no TTY to prompt on. Callers that need a real
+    // read-only guarantee must use isolateWorkspace (see invokeAntigravity), which
+    // denies agy access to the repo by running it in an empty directory.
     args.push("--dangerously-skip-permissions");
   }
   return args;
 }
 
-// Pure, unit-testable: return the text between the first standalone BEGIN marker
-// line and the next standalone END marker line, trimmed. Markers must be alone on
-// their line (after trimming) so a mention inside narration prose never matches.
-// Returns null when the markers are absent or unpaired — callers fall back to the
-// full output so a non-compliant agy run never loses the answer.
+// Pure, unit-testable: return the text between the standalone BEGIN marker line
+// and the standalone END marker line, trimmed. Markers must be alone on their
+// line (after trimming) so a mention inside narration prose never matches.
+//
+// Requires EXACTLY ONE begin and one end marker, in order. Absent, unpaired,
+// out-of-order, or DUPLICATE markers all return null — a second marker pair is
+// ambiguous (an injection could smuggle in an attacker-chosen payload as the
+// first pair), so we refuse rather than guess. Callers fall back to the full
+// output when this returns null, so a non-compliant agy run never loses the
+// answer; with per-call nonce markers, content cannot forge a valid pair.
 export function extractMarkedResponse(text, begin = RESPONSE_BEGIN, end = RESPONSE_END) {
   if (!text) return null;
   const lines = text.split("\n");
-  let start = -1;
+  const beginLines = [];
+  const endLines = [];
   for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === begin) {
-      start = i + 1;
-      break;
-    }
+    const trimmed = lines[i].trim();
+    if (trimmed === begin) beginLines.push(i);
+    if (trimmed === end) endLines.push(i);
   }
-  if (start === -1) return null;
-  for (let i = start; i < lines.length; i += 1) {
-    if (lines[i].trim() === end) {
-      return lines.slice(start, i).join("\n").trim();
-    }
-  }
-  return null;
+  if (beginLines.length !== 1 || endLines.length !== 1) return null;
+  if (endLines[0] <= beginLines[0]) return null;
+  return lines.slice(beginLines[0] + 1, endLines[0]).join("\n").trim();
 }
 
 // Invoke agy, capture its response, print it. Resolves { status }. The temp
 // prompt dir is always cleaned up. agy's stderr is passed through so real auth
 // or quota errors stay visible.
-export async function invokeAntigravity({ prompt, model, write, cwd }) {
+export async function invokeAntigravity({ prompt, model, write, cwd, isolateWorkspace = false }) {
   const promptDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-prompt-"));
+  // Read-only reviews inline the entire diff into the prompt, so agy needs no
+  // access to the user's repo. Run it in an isolated empty workspace so
+  // read-only is structural — agy literally cannot see or modify the repo —
+  // rather than resting on agy's headless permission behavior.
+  const workspaceDir = isolateWorkspace
+    ? fs.mkdtempSync(path.join(os.tmpdir(), "agy-workspace-"))
+    : null;
+  const effectiveCwd = workspaceDir ?? cwd;
   try {
     // Unique filename so the -p instruction can't be satisfied by a same-named
     // file in the user's workspace (cwd); the write is inside the try so a
@@ -151,12 +189,34 @@ export async function invokeAntigravity({ prompt, model, write, cwd }) {
     const promptFile = `agy-request-${randomUUID()}.md`;
     fs.writeFileSync(path.join(promptDir, promptFile), prompt);
 
-    const args = buildAgyArgs({ promptDir, promptFile, write, model });
-    const result = await captureCommand(AGY_BINARY, args, { cwd, timeoutMs: INVOKE_TIMEOUT_MS });
+    // Per-invocation nonce markers: content under review can't forge them, so
+    // it can't hijack extraction. The same markers drive buildAgyArgs (what agy
+    // is told to emit) and extractMarkedResponse (what we look for).
+    const markers = makeResponseMarkers();
+    const args = buildAgyArgs({
+      promptDir,
+      promptFile,
+      write,
+      model,
+      begin: markers.begin,
+      end: markers.end
+    });
+    const result = await captureCommand(AGY_BINARY, args, {
+      cwd: effectiveCwd,
+      timeoutMs: INVOKE_TIMEOUT_MS
+    });
 
-    // Prefer the marker-delimited response (drops agy's tool-use narration); fall
-    // back to the full captured output if agy didn't emit the markers.
-    const answer = extractMarkedResponse(result.stdout) ?? result.stdout;
+    // Prefer the marker-delimited response (drops agy's tool-use narration). If
+    // the markers are missing/ambiguous, fall back to the full captured output
+    // so the answer is never lost — but warn, since that output may include
+    // narration and the read-only/marker contract wasn't honored.
+    const extracted = extractMarkedResponse(result.stdout, markers.begin, markers.end);
+    const answer = extracted ?? result.stdout;
+    if (extracted === null && result.stdout) {
+      process.stderr.write(
+        "warning: agy did not emit the expected response markers; showing raw output.\n"
+      );
+    }
     if (answer) {
       process.stdout.write(answer.endsWith("\n") ? answer : answer + "\n");
     }
@@ -170,5 +230,8 @@ export async function invokeAntigravity({ prompt, model, write, cwd }) {
     return { status: result.status };
   } finally {
     fs.rmSync(promptDir, { recursive: true, force: true });
+    if (workspaceDir) {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
   }
 }

@@ -148,8 +148,13 @@ The plugin drives `agy` in non-interactive print mode (`-p`). The prompt body is
 
 agy **1.0.7 or later** is required: older versions hang in headless print mode (no output, no exit). `/ask-antigravity:setup` and every invocation path check the version and tell you to upgrade instead of hanging.
 
-- **Read-only paths** (`/ask-antigravity:review`, `/ask-antigravity:adversarial-review`, `/ask-antigravity:rescue` without `--write`) invoke agy without permission overrides, so the run cannot modify the workspace.
-- **Write path** (`/ask-antigravity:rescue --write`) passes `--dangerously-skip-permissions` so write tasks don't stall on a permission prompt; agy may then edit files and run tools.
+### What can and cannot touch your files
+
+- **Reviews** (`/ask-antigravity:review`, `/ask-antigravity:adversarial-review`) do not give agy access to your repository at all. The complete diff is inlined into the prompt, so agy is run in an isolated empty working directory and never sees your working tree. This is enforced by the plugin, not by agy.
+- **Rescue** (`/ask-antigravity:rescue`) runs agy **in your repository** so it can read your code. `--write` signals write intent and passes `--dangerously-skip-permissions`.
+
+> [!WARNING]
+> **Omitting `--write` is not a sandbox.** On agy 1.1.1, nothing in the CLI prevents agy from editing files in headless print mode — we verified that omitting `--dangerously-skip-permissions`, and passing `--mode plan` or `--sandbox`, all still let agy overwrite a file when asked to. `--write` therefore expresses *intent*, and auto-approves permission prompts; it is not a capability boundary. Treat any `rescue` run as potentially write-capable: work on a clean git tree so anything agy changes shows up in `git diff` and can be reverted. If you need a hard guarantee, run rescue against a throwaway copy of the repo.
 
 ### Model selection
 
@@ -190,7 +195,7 @@ You lose the slash-command UX in these agents, but the capability remains reacha
 copilot plugin install contrapuntal/antigravity-cli-plugin-cc
 ```
 
-The plugin's `agents/antigravity-rescue.md` also loads as a Copilot agent automatically.
+This installs the `antigravity-helper` skill (declared in `.plugin/plugin.json`), which is the Copilot surface — invoke it by describing the review or delegation task. The `antigravity-rescue` subagent is a Claude Code plugin component and is not loaded by Copilot; under Copilot, use the skill instead.
 
 ### Codex CLI, OpenCode, Pi.dev — symlink install
 

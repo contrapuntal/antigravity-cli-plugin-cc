@@ -2,6 +2,7 @@
 // antigravity-cli-plugin-cc companion script.
 // Single dispatcher for the antigravity plugin's four subcommands.
 
+import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -152,7 +153,9 @@ async function runReview(rest, { mode }) {
   process.stdout.write(renderReviewHeader({ summary: context.summary, target, mode }));
 
   const model = resolveModelAlias(options.model) ?? DEFAULT_REVIEW_MODEL;
-  const result = await invokeAntigravity({ prompt, model, write: false, cwd });
+  // Reviews are read-only and the whole diff is already in the prompt, so run
+  // agy in an isolated workspace — it never touches the repo being reviewed.
+  const result = await invokeAntigravity({ prompt, model, write: false, cwd, isolateWorkspace: true });
   if (result.status !== 0) {
     process.exit(result.status || 1);
   }
@@ -160,7 +163,7 @@ async function runReview(rest, { mode }) {
 
 async function runTask(rest) {
   const { options, positionals } = parseArgs(rest, {
-    valueOptions: ["model"],
+    valueOptions: ["model", "prompt-file"],
     booleanOptions: ["write", "wait", "background"]
   });
 
@@ -168,7 +171,21 @@ async function runTask(rest) {
     return;
   }
 
-  const taskText = positionals.join(" ").trim();
+  // Prefer --prompt-file when given: the caller (slash command / subagent) writes
+  // the free-form task text to a file with a structured tool, so it never rides
+  // on a shell command line where $(...)/backticks would execute. Falls back to
+  // positional text for direct CLI use.
+  let taskText;
+  if (options["prompt-file"]) {
+    try {
+      taskText = fs.readFileSync(options["prompt-file"], "utf8").trim();
+    } catch (error) {
+      process.stdout.write(`Could not read --prompt-file: ${error.message}\n`);
+      process.exit(2);
+    }
+  } else {
+    taskText = positionals.join(" ").trim();
+  }
   if (!taskText) {
     process.stdout.write("No task provided. Pass the task description as text.\n");
     process.exit(2);

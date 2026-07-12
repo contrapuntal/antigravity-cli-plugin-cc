@@ -83,6 +83,31 @@ test("splitRawArgumentString handles backslash escapes", () => {
   );
 });
 
+test("splitRawArgumentString preserves backslashes in Windows paths", () => {
+  // Regression: unconditional backslash-stripping turned C:\src\file into
+  // C:srcfile. A backslash before a non-special char must be preserved.
+  assert.deepEqual(splitRawArgumentString("C:\\src\\file"), ["C:\\src\\file"]);
+});
+
+test("splitRawArgumentString preserves backslashes in regexes", () => {
+  // Regression: /\d+/ became /d+/ under unconditional stripping.
+  assert.deepEqual(splitRawArgumentString("/\\d+/"), ["/\\d+/"]);
+});
+
+test("splitRawArgumentString collapses an escaped backslash to one", () => {
+  // A backslash escaping another backslash yields a single literal backslash.
+  assert.deepEqual(splitRawArgumentString("a\\\\b"), ["a\\b"]);
+});
+
+test("splitRawArgumentString preserves a trailing backslash", () => {
+  assert.deepEqual(splitRawArgumentString("path\\"), ["path\\"]);
+});
+
+test("splitRawArgumentString escapes the active quote inside quotes", () => {
+  // Inside double quotes, \" is a literal quote, not a delimiter.
+  assert.deepEqual(splitRawArgumentString('"he said \\"hi\\""'), ['he said "hi"']);
+});
+
 test("resolveModelAlias passes model names through unchanged", () => {
   // agy has no built-in aliases; values must be exact agy display names.
   assert.equal(resolveModelAlias("Gemini 3.5 Flash (High)"), "Gemini 3.5 Flash (High)");

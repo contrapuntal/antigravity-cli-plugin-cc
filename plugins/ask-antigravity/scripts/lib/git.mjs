@@ -123,7 +123,11 @@ export function detectDefaultBranch(cwd) {
   if (symbolic.status === 0) {
     const remoteHead = symbolic.stdout.trim();
     if (remoteHead.startsWith("refs/remotes/origin/")) {
-      return remoteHead.replace("refs/remotes/origin/", "");
+      // Keep the `origin/` qualifier (strip only `refs/remotes/`). Returning a
+      // bare `main` breaks `main...HEAD` in clones that have origin/main but no
+      // local main branch (CI checkouts, topic-only clones); `origin/main`
+      // always resolves as long as the remote-tracking ref exists.
+      return remoteHead.replace("refs/remotes/", "");
     }
   }
 

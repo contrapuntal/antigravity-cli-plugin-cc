@@ -56,12 +56,15 @@ Same output shape; framing is "find reasons this should not ship" rather than ge
 ### Delegate a task / second opinion
 
 ```bash
-# Read-only: Antigravity analyzes and proposes; the host agent or user applies any change.
+# Default: Antigravity analyzes and proposes. NOTE: this is not a sandbox — agy may
+# still edit files (see "Not a guaranteed sandbox" below). Run on a clean git tree.
 node "$ANTIGRAVITY_CLI_PLUGIN_CC_ROOT/plugins/ask-antigravity/scripts/antigravity-companion.mjs" task "investigate why the build is failing in CI"
 
-# Write: Antigravity may edit files directly (passes --dangerously-skip-permissions to agy). Use only when the user explicitly asked for write-capable execution.
+# Write intent: passes --dangerously-skip-permissions so agy won't stall on prompts.
 node "$ANTIGRAVITY_CLI_PLUGIN_CC_ROOT/plugins/ask-antigravity/scripts/antigravity-companion.mjs" task --write "fix the failing test with the smallest safe patch"
 ```
+
+Prefer `--prompt-file <path>` over inline text when the task text is untrusted or contains shell metacharacters: it carries the text as data instead of on a shell command line.
 
 ### Setup probe (verify install + auth)
 
@@ -96,7 +99,7 @@ For large reviews (multi-file diffs, branch reviews, or long rescue tasks), run 
 
 - **Not a slash-command surface.** Skills are model-invoked; for `/ask-antigravity:review`-style UX, install the antigravity-cli-plugin-cc *plugin* into Claude Code instead.
 - **Not stateful.** No transcripts, no session resume, no PID tracking. Every invocation is a fresh one-shot agy call.
-- **Not a rewrite proxy.** The read-only paths (`review`, `adversarial-review`, default `task`) do not pass write permissions to agy; only `task --write` can modify the workspace.
+- **Not a guaranteed sandbox.** `review` and `adversarial-review` are safe by construction: the whole diff is inlined into the prompt and agy is run in an isolated empty working directory, so it never sees the repo. But `task` runs agy **in the repo**, and omitting `--write` does *not* stop it from editing files — on agy 1.1.1 no CLI flag does (verified: omitting `--dangerously-skip-permissions`, `--mode plan`, and `--sandbox` all still wrote). `--write` signals intent and auto-approves prompts; it is not a capability boundary. Run `task` on a clean git tree so any change is visible in `git diff`.
 
 ## Reference
 

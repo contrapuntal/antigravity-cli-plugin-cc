@@ -130,6 +130,29 @@ test("captureCommand kills a wedged child on timeout and reports timedOut", asyn
   assert.notEqual(result.status, 0, "a timed-out child must not look successful");
 });
 
+test("captureCommand timeout kills the whole tree when a grandchild holds the pipe", async () => {
+  // Regression: SIGKILLing only the direct child leaves grandchildren that
+  // inherited the stdout/stderr pipe alive, so 'close' (which waits for the
+  // pipes to close) is delayed until the grandchild exits — and temp-dir
+  // cleanup with it. The parent spawns a grandchild that inherits its stdio
+  // and both live ~6s; a correct timeout kills the group and resolves in well
+  // under that.
+  const parentCode =
+    "const {spawn}=require('child_process');" +
+    "spawn(process.execPath,['-e','setTimeout(()=>{},6000)'],{stdio:'inherit'});" +
+    "setTimeout(()=>{},6000);";
+  const start = Date.now();
+  const result = await captureCommand(process.execPath, ["-e", parentCode], {
+    timeoutMs: 300
+  });
+  const elapsed = Date.now() - start;
+  assert.equal(result.timedOut, true);
+  assert.ok(
+    elapsed < 3000,
+    `expected the process tree to be killed promptly, but resolved in ${elapsed}ms`
+  );
+});
+
 test("captureCommand surfaces a non-zero child exit code", async () => {
   const result = await captureCommand("node", ["-e", "process.exit(3)"], { timeoutMs: 15000 });
   assert.equal(result.status, 3);

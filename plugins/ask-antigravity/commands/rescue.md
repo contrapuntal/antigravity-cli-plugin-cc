@@ -1,6 +1,7 @@
 ---
 description: Delegate investigation, analysis, or a coding task to the Antigravity rescue subagent
 argument-hint: "[--background|--wait] [--write] [--model <name>] [what Antigravity should investigate, analyze, or solve]"
+disable-model-invocation: true
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -18,11 +19,11 @@ Execution mode:
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
 - `--model "<display name>"` selects the model for this call (names come from `agy models`; quote them — they contain spaces). Preserve it for the forwarded `task` call. Without it, agy uses the model selected in its TUI (`/model`).
-- `--write` enables Antigravity to edit files (passes `--dangerously-skip-permissions` to agy). Preserve it for the forwarded `task` call. If the user did not pass `--write`, default to read-only — Antigravity analyzes and proposes; Claude or the user applies.
+- `--write` signals write intent (passes `--dangerously-skip-permissions` to agy). Preserve it for the forwarded `task` call. Without it, ask Antigravity to analyze and propose rather than apply changes — but note this is *not* a sandbox: on agy 1.1.1 no flag prevents agy from editing files, so a rescue run may modify the workspace either way. If the working tree is dirty and the user did not pass `--write`, warn them that any Antigravity edits will be mixed into their uncommitted changes.
 
 Operating rules:
 
-- The subagent is a thin forwarder only. It uses one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" task ...` and returns that command's stdout as-is.
+- The subagent is a thin forwarder only. It writes the task text to a temp file and makes one `Bash` call — `node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" task --prompt-file "<file>" ...` — then returns that command's stdout as-is. Task text goes through the file, never interpolated into the shell command.
 - Return the Antigravity companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, summarize output, or do follow-up work of its own.

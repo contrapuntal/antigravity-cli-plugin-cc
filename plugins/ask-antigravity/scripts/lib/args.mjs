@@ -83,7 +83,14 @@ export function splitRawArgumentString(raw) {
 
   for (const character of raw) {
     if (escaping) {
-      current += character;
+      // Consume the backslash only when it escapes whitespace, the active
+      // quote, or another backslash. Otherwise keep it literal so Windows
+      // paths (C:\src\file) and regexes (/\d+/) survive tokenization intact.
+      if (/\s/.test(character) || character === quote || character === "\\") {
+        current += character;
+      } else {
+        current += "\\" + character;
+      }
       escaping = false;
       continue;
     }

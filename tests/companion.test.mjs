@@ -29,16 +29,25 @@ if (args.includes("--version")) {
   process.stdout.write((process.env.AGY_FAKE_VERSION || "9.9.9") + "\\n");
   process.exit(0);
 }
+// Optional: prove where agy actually ran by dropping a sentinel in its cwd.
+if (process.env.AGY_FAKE_SENTINEL) {
+  fs.writeFileSync(path.join(process.cwd(), process.env.AGY_FAKE_SENTINEL), "x");
+}
 let body = "";
 const addDir = args[args.indexOf("--add-dir") + 1];
 if (addDir) {
   const file = fs.readdirSync(addDir)[0];
   body = fs.readFileSync(path.join(addDir, file), "utf8");
 }
+// Honor the per-invocation nonce markers the companion instructs us to use
+// (real agy is told them in the -p prompt); fall back to the base constants.
+const pArg = args[args.indexOf("-p") + 1] || "";
+const begin = (pArg.match(/===AGY-RESPONSE-BEGIN-[0-9a-f-]+===/) || ["===AGY-RESPONSE-BEGIN==="])[0];
+const end = (pArg.match(/===AGY-RESPONSE-END-[0-9a-f-]+===/) || ["===AGY-RESPONSE-END==="])[0];
 process.stdout.write("I will read the request file in the workspace directory.\\n");
-process.stdout.write("===AGY-RESPONSE-BEGIN===\\n");
+process.stdout.write(begin + "\\n");
 process.stdout.write("FAKE-ANSWER: " + body.split("\\n")[0] + "\\n");
-process.stdout.write("===AGY-RESPONSE-END===\\n");
+process.stdout.write(end + "\\n");
 process.stdout.write("trailing narration that must be discarded\\n");
 `;
 
@@ -151,4 +160,58 @@ test("task without text exits 2", (t) => {
   const result = runCompanion(["task"], env);
   assert.equal(result.status, 2);
   assert.match(result.stdout, /No task provided/);
+});
+
+test("task reads free-form text from --prompt-file (no shell interpolation of args)", (t) => {
+  const { env, logFile } = makeFakeAgy(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-taskfile-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "req.md");
+  // Text a shell would treat as command substitution / metacharacters; passed
+  // via file it must reach agy verbatim, never executed.
+  const text = "investigate the $(reboot) `rm -rf /` bug";
+  fs.writeFileSync(file, text);
+  const result = runCompanion(["task", "--prompt-file", file], env);
+  assert.equal(result.status, 0, result.stderr);
+  const invoke = readCalls(logFile).find((argv) => argv.includes("--add-dir"));
+  const promptDir = invoke[invoke.indexOf("--add-dir") + 1];
+  assert.ok(promptDir, "agy must be invoked with the prompt workspace");
+  // The fake echoes the prompt file's first line as the answer; the dangerous
+  // text must appear verbatim, proving it was carried as data, not executed.
+  assert.match(result.stdout, /investigate the \$\(reboot\)/);
+});
+
+function makeDirtyRepo(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-review-repo-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const run = (a) => spawnSync("git", ["-C", dir, ...a], { encoding: "utf8" });
+  spawnSync("git", ["init", "--initial-branch=main", dir]);
+  run(["config", "user.email", "test@example.com"]);
+  run(["config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(dir, "file.txt"), "one\n");
+  run(["add", "."]);
+  run(["commit", "-m", "init"]);
+  fs.writeFileSync(path.join(dir, "file.txt"), "two\n"); // dirty working tree
+  return dir;
+}
+
+test("review runs agy in an isolated workspace, leaving the repo untouched", (t) => {
+  // Read-only is structural: the full diff is in the prompt, so agy is run in an
+  // isolated cwd and cannot reach the repo. The fake agy writes a sentinel into
+  // its cwd; after a review the repo working dir must contain no such file.
+  const { env } = makeFakeAgy(t);
+  const repo = makeDirtyRepo(t);
+  const sentinel = "AGY_WROTE_HERE.txt";
+  const result = spawnSync(process.execPath, [COMPANION, "review"], {
+    cwd: repo,
+    env: { ...env, AGY_FAKE_SENTINEL: sentinel },
+    encoding: "utf8",
+    timeout: 30000
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /FAKE-ANSWER/, "review should still produce agy's answer");
+  assert.ok(
+    !fs.existsSync(path.join(repo, sentinel)),
+    "review must not run agy inside the repo working directory"
+  );
 });

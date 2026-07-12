@@ -10,7 +10,8 @@ import {
   getCurrentBranch,
   getWorkingTreeState,
   resolveReviewTarget,
-  collectReviewContext
+  collectReviewContext,
+  detectDefaultBranch
 } from "../plugins/ask-antigravity/scripts/lib/git.mjs";
 
 function makeTempRepo() {
@@ -274,6 +275,57 @@ test("collectReviewContext handles filenames containing newlines", () => {
     assert.match(context.summary, /1 untracked/);
   } finally {
     cleanup(dir);
+  }
+});
+
+// Build a local repo whose origin/HEAD points at origin/main, but which has
+// NO local `main` branch (only a topic branch checked out) — the shape of a CI
+// checkout or a partial clone.
+function makeRepoWithRemoteHeadButNoLocalDefault() {
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-remote-"));
+  runCommandChecked("git", ["init", "--bare", "--initial-branch=main", remote]);
+
+  const seed = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-seed-"));
+  runCommandChecked("git", ["init", "--initial-branch=main", seed]);
+  runCommandChecked("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+  runCommandChecked("git", ["-C", seed, "config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(seed, "README.md"), "# seed\n");
+  runCommandChecked("git", ["-C", seed, "add", "."]);
+  runCommandChecked("git", ["-C", seed, "commit", "-m", "init"]);
+  runCommandChecked("git", ["-C", seed, "remote", "add", "origin", remote]);
+  runCommandChecked("git", ["-C", seed, "push", "origin", "main"]);
+
+  const local = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-local-"));
+  runCommandChecked("git", ["init", "--initial-branch=topic", local]);
+  runCommandChecked("git", ["-C", local, "config", "user.email", "test@example.com"]);
+  runCommandChecked("git", ["-C", local, "config", "user.name", "Test"]);
+  runCommandChecked("git", ["-C", local, "remote", "add", "origin", remote]);
+  runCommandChecked("git", ["-C", local, "fetch", "origin"]);
+  // Point origin/HEAD at origin/main without creating a local main branch.
+  runCommandChecked("git", ["-C", local, "remote", "set-head", "origin", "main"]);
+  // A local commit on the topic branch so main...HEAD is a meaningful range.
+  fs.writeFileSync(path.join(local, "topic.txt"), "topic work\n");
+  runCommandChecked("git", ["-C", local, "add", "."]);
+  runCommandChecked("git", ["-C", local, "commit", "-m", "topic"]);
+  return { remote, seed, local };
+}
+
+test("detectDefaultBranch returns a remote-qualified ref when no local default branch exists", () => {
+  const { remote, seed, local } = makeRepoWithRemoteHeadButNoLocalDefault();
+  try {
+    const base = detectDefaultBranch(local);
+    // Must be remote-qualified so the ref actually resolves; a bare `main`
+    // has no local branch here and would fail as a diff base.
+    assert.equal(base, "origin/main");
+    // The returned ref must be usable as a diff base without erroring — this
+    // is exactly how collectReviewContext consumes it (`git log/diff <range>`).
+    assert.doesNotThrow(() =>
+      runCommandChecked("git", ["-C", local, "log", "--oneline", `${base}...HEAD`])
+    );
+  } finally {
+    cleanup(remote);
+    cleanup(seed);
+    cleanup(local);
   }
 });
 
