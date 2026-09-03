@@ -132,13 +132,22 @@ export function buildAgyArgs({
   if (write) {
     // Auto-approve tool use so write tasks don't stall on a permission prompt.
     //
-    // IMPORTANT: this flag is NOT a capability boundary. Omitting it does not
-    // make the run read-only — on agy 1.1.1, headless print mode will happily
-    // edit files with no flag at all (verified: omitting this flag, --mode plan,
-    // and --sandbox all still wrote). It only affects prompt auto-approval,
-    // which is moot when there is no TTY to prompt on. Callers that need a real
-    // read-only guarantee must use isolateWorkspace (see invokeAntigravity), which
-    // denies agy access to the repo by running it in an empty directory.
+    // IMPORTANT: this flag is NOT a capability boundary for FILE WRITES.
+    // Omitting it does not make the run read-only — on agy 1.1.1, headless
+    // print mode will happily edit files with no flag at all (verified:
+    // omitting this flag, --mode plan, and --sandbox all still wrote).
+    //
+    // But it is NOT a no-op either (CORRECTED on 1.1.25): with no TTY the
+    // permission prompt does not disappear, it auto-DENIES. A tool needing the
+    // "command" permission and absent from the user's permissions.allow is
+    // refused, and agy then abandons the whole response — empty stdout, exit 0.
+    // So omitting this flag genuinely confines shell-command execution to the
+    // user's allowlist; it simply buys nothing against file edits. See
+    // explainEmptyOutput, which turns that silent denial into a real error.
+    //
+    // Callers that need a real read-only guarantee must use isolateWorkspace
+    // (see invokeAntigravity), which denies agy access to the repo by running
+    // it in an empty directory.
     args.push("--dangerously-skip-permissions");
   }
   return args;
@@ -167,6 +176,24 @@ export function extractMarkedResponse(text, begin = RESPONSE_BEGIN, end = RESPON
   if (beginLines.length !== 1 || endLines.length !== 1) return null;
   if (endLines[0] <= beginLines[0]) return null;
   return lines.slice(beginLines[0] + 1, endLines[0]).join("\n").trim();
+}
+
+// Pure, unit-testable: explain why agy returned nothing. The actionable
+// permission fix is offered ONLY when agy's own stderr shows that denial —
+// otherwise we report the empty result plainly rather than inventing a cause
+// we did not observe.
+export function explainEmptyOutput(stderr = "") {
+  const deniedTool = /required the "?command"? permission|permissions\.allow/i.test(stderr);
+  if (deniedTool) {
+    return (
+      "agy produced no answer: a tool required a permission that headless mode cannot " +
+      "prompt for, so it was auto-denied.\n" +
+      "Fix: add an allow-rule under permissions.allow in " +
+      "~/.gemini/antigravity-cli/settings.json (e.g. command(<target>)), or re-run with " +
+      "--write to auto-approve tools for this run.\n"
+    );
+  }
+  return "agy produced no answer (empty output); see agy's stderr above for any detail.\n";
 }
 
 // Invoke agy, capture its response, print it. Resolves { status }. The temp
@@ -225,6 +252,15 @@ export async function invokeAntigravity({ prompt, model, write, cwd, isolateWork
     }
     if (result.timedOut) {
       process.stderr.write(`agy did not respond within ${PRINT_TIMEOUT}.\n`);
+      return { status: result.status || 1 };
+    }
+    // agy exits 0 even when it abandons the response — e.g. a tool needing the
+    // "command" permission is auto-denied in headless mode, which yields empty
+    // stdout and status 0. A zero status is therefore not evidence of an
+    // answer; empty output is the only signal. Reporting success here would
+    // hand the caller silence it cannot tell apart from a real result.
+    if (!answer || !answer.trim()) {
+      process.stderr.write(explainEmptyOutput(result.stderr));
       return { status: result.status || 1 };
     }
     return { status: result.status };

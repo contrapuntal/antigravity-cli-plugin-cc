@@ -8,6 +8,7 @@ import {
   buildAgyArgs,
   installHint,
   detectAuth,
+  explainEmptyOutput,
   extractMarkedResponse,
   isSupportedVersion,
   makeResponseMarkers,
@@ -173,4 +174,22 @@ test("buildAgyArgs uses caller-supplied nonce markers in the instruction", () =>
   })[1];
   assert.match(instruction, new RegExp(markers.begin));
   assert.match(instruction, new RegExp(markers.end));
+});
+
+test("explainEmptyOutput names the permission fix when agy reports a denial", () => {
+  const msg = explainEmptyOutput(
+    'a tool required the "command" permission ... permissions.allow ...'
+  );
+  assert.match(msg, /permissions\.allow/);
+  assert.match(msg, /--write/);
+});
+
+test("explainEmptyOutput falls back to a generic reason", () => {
+  const msg = explainEmptyOutput("something else entirely");
+  assert.match(msg, /no answer/);
+  assert.ok(!/permissions\.allow/.test(msg), "no cause may be invented");
+});
+
+test("explainEmptyOutput tolerates missing stderr", () => {
+  assert.match(explainEmptyOutput(), /no answer/);
 });

@@ -29,6 +29,13 @@ if (args.includes("--version")) {
   process.stdout.write((process.env.AGY_FAKE_VERSION || "9.9.9") + "\\n");
   process.exit(0);
 }
+// Reproduce real agy's silent-denial shape: nothing on stdout, a diagnostic on
+// stderr, exit 0. Observed on 1.1.25 when a tool needs a permission that
+// headless mode cannot prompt for.
+if (process.env.AGY_FAKE_EMPTY) {
+  process.stderr.write(process.env.AGY_FAKE_EMPTY + "\\n");
+  process.exit(0);
+}
 // Optional: prove where agy actually ran by dropping a sentinel in its cwd.
 if (process.env.AGY_FAKE_SENTINEL) {
   fs.writeFileSync(path.join(process.cwd(), process.env.AGY_FAKE_SENTINEL), "x");
@@ -213,5 +220,43 @@ test("review runs agy in an isolated workspace, leaving the repo untouched", (t)
   assert.ok(
     !fs.existsSync(path.join(repo, sentinel)),
     "review must not run agy inside the repo working directory"
+  );
+});
+
+// --- empty-output handling -------------------------------------------------
+// agy exits 0 even when it abandons the response, so empty stdout is the only
+// signal that nothing came back. Reporting success there is a silent failure.
+
+const DENIED_STDERR =
+  'jetski: no output produced — a tool required the "command" permission that ' +
+  "headless mode cannot prompt for, so it was auto-denied. Add an allow-rule " +
+  "under permissions.allow in settings.json (e.g. command(<target>)).";
+
+test("task fails loudly when agy returns no answer", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_EMPTY = DENIED_STDERR;
+  const result = runCompanion(["task", "anything"], env);
+  assert.notEqual(result.status, 0, "empty agy output must not report success");
+  assert.equal(result.stdout.trim(), "", "there is no answer to print");
+});
+
+test("empty-output failure names the permission fix and the escape hatch", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_EMPTY = DENIED_STDERR;
+  const result = runCompanion(["task", "anything"], env);
+  assert.match(result.stderr, /agy produced no answer/);
+  assert.match(result.stderr, /permissions\.allow/);
+  assert.match(result.stderr, /--write/, "must point at the escape hatch");
+});
+
+test("empty output with an unrelated stderr gets a generic reason", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_EMPTY = "some unrelated agy warning";
+  const result = runCompanion(["task", "anything"], env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /agy produced no answer/);
+  assert.ok(
+    !/permissions\.allow/.test(result.stderr),
+    "must not invent a permission cause it did not observe"
   );
 });
