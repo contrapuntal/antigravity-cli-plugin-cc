@@ -65,7 +65,11 @@ test("live: companion task round-trip extracts the marked response", { skip }, (
 // "<id>\t<display name>" line per model on stdout.
 function availableModels() {
   const result = spawnSync("agy", ["models"], { encoding: "utf8", timeout: 60000 });
-  if (result.status !== 0) return [];
+  assert.equal(
+    result.status,
+    0,
+    `\`agy models\` failed (exit ${result.status}): ${result.stderr || result.error?.message || "unknown error"}`
+  );
   return result.stdout
     .split("\n")
     .map((line) => line.split("\t")[1]?.trim())
@@ -75,8 +79,12 @@ function availableModels() {
 test("live: print-mode --model accepts a display name", { skip }, () => {
   const models = availableModels();
   assert.ok(models.length > 0, "`agy models` listed nothing — cannot exercise --model");
-  // Prefer the cheapest tier so the smoke test spends as little as possible.
-  const model = models.find((name) => /Flash \(Low\)/.test(name)) ?? models[0];
+  // Prefer the cheapest tier (Low/Lite) so the smoke test spends as little as possible.
+  const model =
+    models.find((name) => /Flash \(Low\)/i.test(name)) ??
+    models.find((name) => /\b(Low|Lite)\b/i.test(name)) ??
+    models.find((name) => /Flash/i.test(name)) ??
+    models[models.length - 1];
 
   const result = spawnSync(
     process.execPath,

@@ -36,6 +36,13 @@ if (process.env.AGY_FAKE_EMPTY) {
   process.stderr.write(process.env.AGY_FAKE_EMPTY + "\\n");
   process.exit(0);
 }
+if (process.env.AGY_FAKE_WHITESPACE) {
+  process.stdout.write(process.env.AGY_FAKE_WHITESPACE);
+  if (process.env.AGY_FAKE_STDERR) {
+    process.stderr.write(process.env.AGY_FAKE_STDERR + "\\n");
+  }
+  process.exit(0);
+}
 // Optional: prove where agy actually ran by dropping a sentinel in its cwd.
 if (process.env.AGY_FAKE_SENTINEL) {
   fs.writeFileSync(path.join(process.cwd(), process.env.AGY_FAKE_SENTINEL), "x");
@@ -247,6 +254,40 @@ test("empty-output failure names the permission fix and the escape hatch", (t) =
   assert.match(result.stderr, /agy produced no answer/);
   assert.match(result.stderr, /permissions\.allow/);
   assert.match(result.stderr, /--write/, "must point at the escape hatch");
+});
+
+test("task with --write already passed does not tell user to re-run with --write", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_EMPTY = DENIED_STDERR;
+  const result = runCompanion(["task", "--write", "anything"], env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /permissions\.allow/);
+  assert.ok(!/re-run with --write/.test(result.stderr), "must not suggest --write when already passed");
+});
+
+test("review fails loudly on empty output without suggesting --write", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_EMPTY = DENIED_STDERR;
+  const repo = makeDirtyRepo(t);
+  const result = spawnSync(process.execPath, [COMPANION, "review"], {
+    cwd: repo,
+    env,
+    encoding: "utf8",
+    timeout: 30000
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /permissions\.allow/);
+  assert.ok(!/--write/.test(result.stderr), "review must not suggest --write");
+});
+
+test("task with whitespace-only agy output fails loudly without dirtying stdout", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_WHITESPACE = "   \n\n\t\n";
+  env.AGY_FAKE_STDERR = DENIED_STDERR;
+  const result = runCompanion(["task", "anything"], env);
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, "", "stdout must remain empty on failed run");
+  assert.match(result.stderr, /agy produced no answer/);
 });
 
 test("empty output with an unrelated stderr gets a generic reason", (t) => {

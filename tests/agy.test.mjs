@@ -176,20 +176,46 @@ test("buildAgyArgs uses caller-supplied nonce markers in the instruction", () =>
   assert.match(instruction, new RegExp(markers.end));
 });
 
-test("explainEmptyOutput names the permission fix when agy reports a denial", () => {
+test("explainEmptyOutput names the permission fix and --write when write can be suggested", () => {
   const msg = explainEmptyOutput(
-    'a tool required the "command" permission ... permissions.allow ...'
+    'a tool required the "command" permission ... permissions.allow ...',
+    { canSuggestWrite: true }
   );
   assert.match(msg, /permissions\.allow/);
   assert.match(msg, /--write/);
 });
 
-test("explainEmptyOutput falls back to a generic reason", () => {
+test("explainEmptyOutput omits --write when write cannot be suggested (e.g. reviews)", () => {
+  const msg = explainEmptyOutput(
+    'a tool required the "command" permission ... permissions.allow ...',
+    { canSuggestWrite: false }
+  );
+  assert.match(msg, /permissions\.allow/);
+  assert.ok(!/--write/.test(msg), "--write must not be suggested when unsupported");
+});
+
+test("explainEmptyOutput detects tool denial even with ANSI escape sequences", () => {
+  const ansiStderr = 'a tool required the \x1b[1m"command"\x1b[0m permission';
+  const msg = explainEmptyOutput(ansiStderr, { canSuggestWrite: true });
+  assert.match(msg, /permissions\.allow/);
+});
+
+test("explainEmptyOutput detects denials for other tool permissions", () => {
+  const msg = explainEmptyOutput('a tool required the "network" permission ...', {
+    canSuggestWrite: false
+  });
+  assert.match(msg, /permissions\.allow/);
+});
+
+test("explainEmptyOutput falls back to a generic reason with stderr pointer", () => {
   const msg = explainEmptyOutput("something else entirely");
   assert.match(msg, /no answer/);
+  assert.match(msg, /see agy's stderr above/);
   assert.ok(!/permissions\.allow/.test(msg), "no cause may be invented");
 });
 
-test("explainEmptyOutput tolerates missing stderr", () => {
-  assert.match(explainEmptyOutput(), /no answer/);
+test("explainEmptyOutput tolerates missing or empty stderr without stderr pointer", () => {
+  const msg = explainEmptyOutput();
+  assert.match(msg, /no answer/);
+  assert.ok(!/see agy's stderr above/.test(msg));
 });

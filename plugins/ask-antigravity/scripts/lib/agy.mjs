@@ -20,7 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { binaryAvailable, captureCommand } from "./process.mjs";
+import { binaryAvailable, captureCommand, stripAnsi } from "./process.mjs";
 
 const AGY_BINARY = "agy";
 const CONFIG_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli");
@@ -181,19 +181,30 @@ export function extractMarkedResponse(text, begin = RESPONSE_BEGIN, end = RESPON
 // Pure, unit-testable: explain why agy returned nothing. The actionable
 // permission fix is offered ONLY when agy's own stderr shows that denial —
 // otherwise we report the empty result plainly rather than inventing a cause
-// we did not observe.
-export function explainEmptyOutput(stderr = "") {
-  const deniedTool = /required the "?command"? permission|permissions\.allow/i.test(stderr);
+// we did not observe. canSuggestWrite controls whether "--write" is offered as
+// an escape hatch; it is omitted when the caller cannot support write (e.g.
+// read-only reviews) or already passed it.
+export function explainEmptyOutput(stderr = "", { canSuggestWrite = false } = {}) {
+  const cleanStderr = stripAnsi(stderr);
+  const deniedTool =
+    /required the "?[a-z0-9_-]+"? permission|permissions\.allow|auto-denied/i.test(cleanStderr);
   if (deniedTool) {
+    const remedy = canSuggestWrite
+      ? "Fix: add an allow-rule under permissions.allow in " +
+        "~/.gemini/antigravity-cli/settings.json (e.g. command(<target>)), or re-run with " +
+        "--write to auto-approve tools for this run.\n"
+      : "Fix: add an allow-rule under permissions.allow in " +
+        "~/.gemini/antigravity-cli/settings.json (e.g. command(<target>)).\n";
     return (
       "agy produced no answer: a tool required a permission that headless mode cannot " +
       "prompt for, so it was auto-denied.\n" +
-      "Fix: add an allow-rule under permissions.allow in " +
-      "~/.gemini/antigravity-cli/settings.json (e.g. command(<target>)), or re-run with " +
-      "--write to auto-approve tools for this run.\n"
+      remedy
     );
   }
-  return "agy produced no answer (empty output); see agy's stderr above for any detail.\n";
+  if (cleanStderr.trim()) {
+    return "agy produced no answer (empty output); see agy's stderr above for any detail.\n";
+  }
+  return "agy produced no answer (empty output).\n";
 }
 
 // Invoke agy, capture its response, print it. Resolves { status }. The temp
@@ -239,29 +250,31 @@ export async function invokeAntigravity({ prompt, model, write, cwd, isolateWork
     // narration and the read-only/marker contract wasn't honored.
     const extracted = extractMarkedResponse(result.stdout, markers.begin, markers.end);
     const answer = extracted ?? result.stdout;
+    if (result.timedOut) {
+      process.stderr.write(`agy did not respond within ${PRINT_TIMEOUT}.\n`);
+      return { status: result.status || 1 };
+    }
+    // agy exits 0 even when it abandons the response — e.g. a tool needing a
+    // permission is auto-denied in headless mode, which yields empty stdout and
+    // status 0. A zero status is therefore not evidence of an answer; empty
+    // output is the only signal. Reporting success here would hand the caller
+    // silence it cannot tell apart from a real result.
+    if (!answer || !answer.trim()) {
+      if (result.stderr) {
+        process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
+      }
+      const canSuggestWrite = !isolateWorkspace && !write;
+      process.stderr.write(explainEmptyOutput(result.stderr, { canSuggestWrite }));
+      return { status: result.status || 1 };
+    }
     if (extracted === null && result.stdout) {
       process.stderr.write(
         "warning: agy did not emit the expected response markers; showing raw output.\n"
       );
     }
-    if (answer) {
-      process.stdout.write(answer.endsWith("\n") ? answer : answer + "\n");
-    }
+    process.stdout.write(answer.endsWith("\n") ? answer : answer + "\n");
     if (result.stderr) {
-      process.stderr.write(result.stderr);
-    }
-    if (result.timedOut) {
-      process.stderr.write(`agy did not respond within ${PRINT_TIMEOUT}.\n`);
-      return { status: result.status || 1 };
-    }
-    // agy exits 0 even when it abandons the response — e.g. a tool needing the
-    // "command" permission is auto-denied in headless mode, which yields empty
-    // stdout and status 0. A zero status is therefore not evidence of an
-    // answer; empty output is the only signal. Reporting success here would
-    // hand the caller silence it cannot tell apart from a real result.
-    if (!answer || !answer.trim()) {
-      process.stderr.write(explainEmptyOutput(result.stderr));
-      return { status: result.status || 1 };
+      process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
     }
     return { status: result.status };
   } finally {
