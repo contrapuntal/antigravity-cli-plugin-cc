@@ -58,19 +58,32 @@ test("live: companion task round-trip extracts the marked response", { skip }, (
   );
 });
 
+// agy's model catalog rotates upstream ("Gemini 3.5 Flash" was current on
+// 1.1.1 and gone by 1.1.25) and --model is strictly validated, so pinning a
+// display name here turns a healthy plugin into a red test on the next model
+// refresh. Ask agy what it currently offers instead: `agy models` prints one
+// "<id>\t<display name>" line per model on stdout.
+function availableModels() {
+  const result = spawnSync("agy", ["models"], { encoding: "utf8", timeout: 60000 });
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split("\n")
+    .map((line) => line.split("\t")[1]?.trim())
+    .filter(Boolean);
+}
+
 test("live: print-mode --model accepts a display name", { skip }, () => {
+  const models = availableModels();
+  assert.ok(models.length > 0, "`agy models` listed nothing — cannot exercise --model");
+  // Prefer the cheapest tier so the smoke test spends as little as possible.
+  const model = models.find((name) => /Flash \(Low\)/.test(name)) ?? models[0];
+
   const result = spawnSync(
     process.execPath,
-    [
-      COMPANION,
-      "task",
-      "Reply with exactly the word PONG and nothing else.",
-      "--model",
-      "Gemini 3.5 Flash (Low)"
-    ],
+    [COMPANION, "task", "Reply with exactly the word PONG and nothing else.", "--model", model],
     { encoding: "utf8", timeout: LIVE_TIMEOUT_MS }
   );
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, `--model ${model}: ${result.stderr}`);
   assert.match(result.stdout, /PONG/);
   assert.ok(!/not supported|ignored/i.test(result.stderr), result.stderr);
 });

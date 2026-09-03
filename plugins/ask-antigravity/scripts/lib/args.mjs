@@ -136,9 +136,11 @@ export function splitRawArgumentString(raw) {
   return tokens;
 }
 
-// agy's print mode takes --model with a display name from `agy models` (e.g.
-// "Gemini 3.5 Flash (Low)"). Values pass through unchanged; the alias map is a
-// hook for future shorthand (e.g. "flash") and currently empty.
+// agy's print mode takes --model with a display name exactly as `agy models`
+// lists it. No name is pinned here on purpose: agy's catalog rotates upstream
+// and --model is strictly validated, so a stale example becomes a wrong one.
+// Values pass through unchanged; the alias map is a hook for future shorthand
+// (e.g. "flash") and currently empty.
 const MODEL_ALIASES = {};
 
 export function resolveModelAlias(model) {
