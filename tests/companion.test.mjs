@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -43,9 +43,26 @@ if (process.env.AGY_FAKE_WHITESPACE) {
   }
   process.exit(0);
 }
+if (process.env.AGY_FAKE_STATUS) {
+  process.stderr.write("service request failed");
+  process.exit(Number(process.env.AGY_FAKE_STATUS));
+}
+if (process.env.AGY_FAKE_RESPONSE) {
+  process.stdout.write(process.env.AGY_FAKE_RESPONSE);
+  process.exit(0);
+}
+if (process.env.AGY_FAKE_HANG) {
+  setInterval(() => {}, 1000);
+  return;
+}
 // Optional: prove where agy actually ran by dropping a sentinel in its cwd.
 if (process.env.AGY_FAKE_SENTINEL) {
   fs.writeFileSync(path.join(process.cwd(), process.env.AGY_FAKE_SENTINEL), "x");
+}
+if (args.includes("--input-format")) {
+  const request = JSON.parse(fs.readFileSync(0, "utf8"));
+  process.stdout.write(JSON.stringify({event:"result", result:{status:"SUCCESS", response:"FAKE-ANSWER: " + request.message.content.split("\\n")[0]}}) + "\\n");
+  process.exit(0);
 }
 let body = "";
 const addDir = args[args.indexOf("--add-dir") + 1];
@@ -60,7 +77,7 @@ const begin = (pArg.match(/===AGY-RESPONSE-BEGIN-[0-9a-f-]+===/) || ["===AGY-RES
 const end = (pArg.match(/===AGY-RESPONSE-END-[0-9a-f-]+===/) || ["===AGY-RESPONSE-END==="])[0];
 process.stdout.write("I will read the request file in the workspace directory.\\n");
 process.stdout.write(begin + "\\n");
-process.stdout.write("FAKE-ANSWER: " + body.split("\\n")[0] + "\\n");
+process.stdout.write((body.includes("Reply with exactly AGY_SETUP_OK") ? "AGY_SETUP_OK" : "FAKE-ANSWER: " + body.split("\\n")[0]) + "\\n");
 process.stdout.write(end + "\\n");
 process.stdout.write("trailing narration that must be discarded\\n");
 `;
@@ -131,6 +148,7 @@ test("task cleans up the temp prompt directory", (t) => {
   assert.equal(result.status, 0, result.stderr);
   const invoke = readCalls(logFile).find((argv) => argv.includes("--add-dir"));
   const promptDir = invoke[invoke.indexOf("--add-dir") + 1];
+  assert.equal(invoke[invoke.indexOf("--print-timeout") + 1], "10m");
   assert.ok(promptDir, "invocation must include --add-dir");
   assert.ok(!fs.existsSync(promptDir), "temp prompt dir must be removed after the run");
 });
@@ -146,7 +164,7 @@ test("task with --write passes --dangerously-skip-permissions", (t) => {
 test("an agy older than the minimum is refused before invocation", (t) => {
   const { env, logFile } = makeFakeAgy(t, { version: "1.0.6" });
   const result = runCompanion(["task", "anything"], env);
-  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(result.status, 0, result.stderr);
   assert.match(result.stdout, /1\.0\.6/);
   assert.match(result.stdout, /upgrade/i);
   const invokes = readCalls(logFile).filter((argv) => !argv.includes("--version"));
@@ -156,7 +174,7 @@ test("an agy older than the minimum is refused before invocation", (t) => {
 test("missing agy yields the install pointer, not a crash", (t) => {
   const { env } = makeFakeAgy(t, { present: false });
   const result = runCompanion(["task", "anything"], env);
-  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(result.status, 0, result.stderr);
   assert.match(result.stdout, /not installed/);
   assert.match(result.stdout, /setup/);
 });
@@ -209,10 +227,9 @@ function makeDirtyRepo(t) {
   return dir;
 }
 
-test("review runs agy in an isolated workspace, leaving the repo untouched", (t) => {
-  // Read-only is structural: the full diff is in the prompt, so agy is run in an
-  // isolated cwd and cannot reach the repo. The fake agy writes a sentinel into
-  // its cwd; after a review the repo working dir must contain no such file.
+test("review uses a temporary cwd for relative writes", (t) => {
+  // A temporary cwd redirects relative writes. This test does not establish
+  // filesystem isolation: absolute paths remain governed by host permissions.
   const { env } = makeFakeAgy(t);
   const repo = makeDirtyRepo(t);
   const sentinel = "AGY_WROTE_HERE.txt";
@@ -300,4 +317,165 @@ test("empty output with an unrelated stderr gets a generic reason", (t) => {
     !/permissions\.allow/.test(result.stderr),
     "must not invent a permission cause it did not observe"
   );
+});
+
+
+test("setup --live --json verifies a response without contaminating JSON", (t) => {
+  const { env, logFile } = makeFakeAgy(t);
+  const result = runCompanion(["setup", "--live", "--json"], env);
+  assert.equal(result.status, 0, result.stderr);
+  const state = JSON.parse(result.stdout);
+  assert.equal(state.live.ok, true);
+  assert.equal(state.ready, true);
+  const invoke = readCalls(logFile).find(args => args.includes("--add-dir"));
+  assert.ok(invoke);
+  assert.equal(invoke[invoke.indexOf("--print-timeout") + 1], "90s");
+  assert.ok(!fs.existsSync(invoke[invoke.indexOf("--add-dir") + 1]));
+});
+
+test("setup --live reports denied tools separately from heuristic auth", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.ANTIGRAVITY_API_KEY = "test-only";
+  env.AGY_FAKE_EMPTY = DENIED_STDERR;
+  const result = runCompanion(["setup", "--live", "--json"], env);
+  assert.notEqual(result.status, 0);
+  const state = JSON.parse(result.stdout);
+  assert.equal(state.authenticated, true);
+  assert.equal(state.live.ok, false);
+  assert.equal(state.ready, false);
+  assert.match(state.live.detail, /permission/);
+});
+
+test("ordinary setup remains local and retains its JSON shape", (t) => {
+  const { env, logFile } = makeFakeAgy(t);
+  const result = runCompanion(["setup", "--json"], env);
+  assert.equal(result.status, 0);
+  assert.equal(JSON.parse(result.stdout).live, undefined);
+  assert.ok(readCalls(logFile).every(args => args.includes("--version")));
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`companion ${signal} kills descendants and cleans prompt files`, { skip: process.platform === "win32" }, async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-cancel-"));
+    const info = path.join(dir, "info.json");
+    const fake = path.join(dir, "agy");
+    fs.writeFileSync(fake, `#!/usr/bin/env node
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+if (process.argv.includes('--version')) { console.log('9.9.9'); process.exit(0); }
+const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {stdio:'inherit'});
+fs.writeFileSync(process.env.CANCEL_INFO, JSON.stringify({pid:process.pid, child:child.pid, cwd:process.cwd(), prompt:process.argv[process.argv.indexOf('--add-dir')+1]}));
+setInterval(()=>{}, 1000);
+`);
+    fs.chmodSync(fake, 0o755);
+    const child = spawn(process.execPath, [COMPANION, "setup", "--live"], {
+      env: {...process.env, PATH: dir + path.delimiter + process.env.PATH, CANCEL_INFO: info}, stdio: "ignore"
+    });
+    let details;
+    t.after(() => {
+      child.kill("SIGKILL");
+      if (details) {
+        try { process.kill(-details.pid, "SIGKILL"); } catch {}
+        fs.rmSync(details.prompt, {recursive:true, force:true});
+        fs.rmSync(details.cwd, {recursive:true, force:true});
+      }
+      fs.rmSync(dir, {recursive:true, force:true});
+    });
+    const exited = new Promise(resolve => child.on("exit", (code, sig) => resolve({code, sig})));
+    const deadline = Date.now() + 4000;
+    while (!fs.existsSync(info) && Date.now() < deadline) await new Promise(r => setTimeout(r, 20));
+    assert.ok(fs.existsSync(info), "live probe must launch agy");
+    details = JSON.parse(fs.readFileSync(info, "utf8"));
+    child.kill(signal);
+    let timer;
+    const result = await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => resolve(null), 4000); })]);
+    clearTimeout(timer);
+    assert.ok(result, "companion must stop promptly");
+    assert.equal(result.code, signal === "SIGINT" ? 130 : 143);
+    assert.ok(!fs.existsSync(details.prompt), "prompt removed on cancellation");
+    assert.ok(!fs.existsSync(details.cwd), "probe workspace removed on cancellation");
+    for (const pid of [details.pid, details.child]) {
+      // Linux may retain an orphaned zombie briefly; it is no longer executing.
+      let running = true;
+      for (let attempt = 0; attempt < 100 && running; attempt++) {
+        try {
+          process.kill(pid, 0);
+          if (process.platform === "linux") {
+            try {
+              running = !/\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, "utf8"));
+            } catch (error) { if (error.code === "ENOENT") running = false; else throw error; }
+          }
+        } catch (error) { if (error.code === "ESRCH") running = false; else throw error; }
+        if (running) await new Promise(r => setTimeout(r, 20));
+      }
+      assert.equal(running, false, `process ${pid} still running`);
+    }
+  });
+}
+
+
+test("setup --live fails when a zero-exit response does not answer the probe", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_RESPONSE = "I will read the request.";
+  const result = runCompanion(["setup", "--live", "--json"], env);
+  assert.notEqual(result.status, 0);
+  assert.equal(JSON.parse(result.stdout).live.ok, false);
+});
+
+test("setup --live surfaces nonzero service failure", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_STATUS = "7";
+  const result = runCompanion(["setup", "--live", "--json"], env);
+  assert.notEqual(result.status, 0);
+  assert.match(JSON.parse(result.stdout).live.detail, /service request failed/);
+});
+
+for (const fixture of [{present:false}, {version:"1.0.6"}]) {
+  test(`setup --live skips unavailable runtime ${JSON.stringify(fixture)}`, (t) => {
+    const { env, logFile } = makeFakeAgy(t, fixture);
+    const result = runCompanion(["setup", "--live", "--json"], env);
+    assert.notEqual(result.status, 0);
+    assert.equal(JSON.parse(result.stdout).live.ok, false);
+    assert.ok(readCalls(logFile).every(args => args.includes("--version")));
+  });
+}
+
+
+test("adapter honors a shorter hard timeout without changing normal review defaults", (t) => {
+  const { env } = makeFakeAgy(t);
+  env.AGY_FAKE_HANG = "1";
+  const url = new URL("../plugins/ask-antigravity/scripts/lib/agy.mjs", import.meta.url).href;
+  const program = `
+    import {invokeAntigravity} from ${JSON.stringify(url)};
+    const result = await invokeAntigravity({prompt:'ping', write:false, isolateWorkspace:true,
+      timeoutMs:100, printTimeout:'90s'});
+    process.exitCode = result.status;
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", program], {
+    env, encoding:"utf8", timeout:3000
+  });
+  assert.ifError(result.error);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /did not respond/);
+});
+
+test('review gates stream-json versions while legacy tasks still work', (t) => {
+  const { env, logFile } = makeFakeAgy(t, { version: '1.1.14' });
+  const review = runCompanion(['review'], env);
+  assert.notEqual(review.status, 0);
+  assert.match(review.stderr, /1\.1\.15/);
+  assert.equal(readCalls(logFile).length, 1);
+  const task = runCompanion(['task', 'Say hello'], env);
+  assert.equal(task.status, 0);
+});
+
+test('missing CLI setup still emits valid authentication JSON', (t) => {
+  const { env } = makeFakeAgy(t, { present: false });
+  for (const args of [['setup', '--json'], ['setup', '--live', '--json']]) {
+    const output = runCompanion(args, env);
+    const state = JSON.parse(output.stdout);
+    assert.equal(state.installed, false);
+    assert.equal(state.authenticated, false);
+    assert.equal(state.ready, false);
+  }
 });

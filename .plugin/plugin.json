@@ -2,7 +2,7 @@
   "name": "antigravity-cli-plugin-cc",
   "displayName": "Antigravity Helper",
   "description": "Run Antigravity from inside Copilot CLI for code reviews and delegated tasks. Wraps the antigravity-cli-plugin-cc companion script.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "antigravity-cli-plugin-cc contributors"
   },

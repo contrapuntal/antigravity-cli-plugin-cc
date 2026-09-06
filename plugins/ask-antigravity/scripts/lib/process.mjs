@@ -163,7 +163,7 @@ export function captureCommand(command, args = [], options = {}) {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [typeof options.input === "string" ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
       // Own process group (POSIX) so a timeout can kill the entire tree, not
       // just the direct child. Grandchildren that inherited the stdout/stderr
@@ -172,18 +172,81 @@ export function captureCommand(command, args = [], options = {}) {
       detached: process.platform !== "win32"
     });
 
+    let inputError = null;
+    if (typeof options.input === "string") {
+      child.stdin.on("error", (error) => { inputError = error; });
+      child.stdin.end(options.input);
+    }
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let cancellationSignal = null;
     let settled = false;
     let killTimer = null;
     let deadlineTimer = null;
+    let graceTimer = null;
+    let closedResult = null;
+    let completedBeforeCancel = null;
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
+
+    const onInterrupt = () => cancel("SIGINT");
+    const onTerminate = () => cancel("SIGTERM");
+    if (options.handleSignals) {
+      process.on("SIGINT", onInterrupt);
+      process.on("SIGTERM", onTerminate);
+    }
+    function removeSignalHandlers() {
+      if (options.handleSignals) {
+        process.removeListener("SIGINT", onInterrupt);
+        process.removeListener("SIGTERM", onTerminate);
+      }
+    }
+    function cancel(signal) {
+      if (settled || timedOut) return;
+      if (graceTimer) {
+        // A second cancellation skips the remaining graceful shutdown window.
+        clearTimeout(graceTimer);
+        graceTimer = null;
+        terminate();
+        if (closedResult) finish(closedResult);
+        return;
+      }
+      if (cancellationSignal || completedBeforeCancel) return;
+      if (child.exitCode !== null || child.signalCode !== null) {
+        // 'exit' can precede 'close' while descendants keep the pipes open.
+        // Release those descendants without discarding the completed response.
+        completedBeforeCancel = {
+          status: child.signalCode ? 128 + signalNumber(child.signalCode) : child.exitCode,
+          signal: child.signalCode
+        };
+      } else {
+        cancellationSignal = signal;
+      }
+      if (killTimer) clearTimeout(killTimer);
+      killProcessTree(child, "SIGTERM");
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        terminate();
+        if (closedResult) finish(closedResult);
+      }, options.killGraceMs ?? 2000);
+    }
+    function terminate() {
+      if (killTimer) clearTimeout(killTimer);
+      if (deadlineTimer) return;
+      killProcessTree(child);
+      // Also settle if a descendant escaped the group but retained a pipe.
+      deadlineTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ status: 137, signal: "SIGKILL", stdout: cleanOutput(stdout), stderr, timedOut });
+      }, options.killGraceMs ?? 2000);
+    }
 
     // Single settle point so the timeout backstop and the 'close' event can't
     // both resolve, and every timer is cleared exactly once.
@@ -192,27 +255,21 @@ export function captureCommand(command, args = [], options = {}) {
       settled = true;
       if (killTimer) clearTimeout(killTimer);
       if (deadlineTimer) clearTimeout(deadlineTimer);
-      resolve(result);
+      if (graceTimer) clearTimeout(graceTimer);
+      removeSignalHandlers();
+      if (inputError && result.status === 0) {
+        result = { ...result, status: 1, stderr: result.stderr + `\nFailed to deliver stdin: ${inputError.message}\n` };
+      }
+      resolve(cancellationSignal ? {
+        ...result, status: 128 + signalNumber(cancellationSignal),
+        signal: cancellationSignal, cancelled: true
+      } : { ...result, ...completedBeforeCancel });
     }
 
     if (options.timeoutMs && options.timeoutMs > 0) {
       killTimer = setTimeout(() => {
         timedOut = true;
-        killProcessTree(child);
-        // Backstop: if a stray descendant still holds a pipe open, 'close' may
-        // never fire. Destroy the streams and settle anyway after a short grace
-        // so a wedged process can't hang the caller forever.
-        deadlineTimer = setTimeout(() => {
-          child.stdout.destroy();
-          child.stderr.destroy();
-          finish({
-            status: 128 + signalNumber("SIGKILL"),
-            signal: "SIGKILL",
-            stdout: cleanOutput(stdout),
-            stderr,
-            timedOut: true
-          });
-        }, options.killGraceMs ?? 2000);
+        terminate();
       }, options.timeoutMs);
     }
 
@@ -221,16 +278,22 @@ export function captureCommand(command, args = [], options = {}) {
       settled = true;
       if (killTimer) clearTimeout(killTimer);
       if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+      removeSignalHandlers();
       reject(error);
     });
     child.on("close", (code, signal) => {
-      finish({
+      const result = {
         status: signal ? 128 + signalNumber(signal) : (code ?? 0),
         signal: signal ?? null,
         stdout: cleanOutput(stdout),
         stderr,
         timedOut
-      });
+      };
+      // Preserve the grace period for descendants even if the direct child
+      // closes its pipes first. The timer force-kills any remaining group.
+      if (graceTimer) closedResult = result;
+      else finish(result);
     });
   });
 }
@@ -238,16 +301,16 @@ export function captureCommand(command, args = [], options = {}) {
 // Kill a child and any descendants it spawned. On POSIX the child is a process-
 // group leader (spawned detached), so a negative PID signals the whole group.
 // Falls back to a direct kill if the group is already gone or on Windows.
-function killProcessTree(child) {
+function killProcessTree(child, signal = "SIGKILL") {
   try {
     if (process.platform === "win32") {
-      child.kill("SIGKILL");
+      child.kill(signal);
     } else {
-      process.kill(-child.pid, "SIGKILL");
+      process.kill(-child.pid, signal);
     }
   } catch {
     try {
-      child.kill("SIGKILL");
+      child.kill(signal);
     } catch {
       // Already exited — nothing to kill.
     }

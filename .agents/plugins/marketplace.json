@@ -1,0 +1,20 @@
+{
+  "name": "contrapuntal",
+  "interface": {
+    "displayName": "Contrapuntal"
+  },
+  "plugins": [
+    {
+      "name": "ask-antigravity",
+      "source": {
+        "source": "local",
+        "path": "./plugins/ask-antigravity"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

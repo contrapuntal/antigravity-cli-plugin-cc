@@ -1,8 +1,8 @@
 // Antigravity CLI (`agy`) adapter. Replaces the old gemini.mjs.
 //
 // Two things make agy different from the old `gemini` binary and shape this
-// module (see memory: agy-cli-migration-constraints):
-//   1. The prompt is an argv value, not stdin, so large multi-file prompts would
+// legacy task/setup transport (reviews use static-review.mjs with stream-json stdin):
+//   1. Legacy task/setup transport uses an argv prompt, so large prompts would
 //      blow the OS argv limit -> we write the prompt to a temp file and add it to
 //      agy's workspace with --add-dir, then a short -p instruction tells agy to
 //      read it. (Verified: agy reads the file read-only, no skip-permissions.)
@@ -36,13 +36,13 @@ const INVOKE_TIMEOUT_MS = 12 * 60 * 1000;
 // rather than stall until INVOKE_TIMEOUT_MS.
 export const MIN_AGY_VERSION = "1.0.7";
 
-// Compare an `agy --version` string against MIN_AGY_VERSION. Unparseable
+// Compare an `agy --version` string against the requested minimum. Unparseable
 // versions (dev builds) are assumed supported rather than blocking the user.
-export function isSupportedVersion(version) {
+export function isSupportedVersion(version, minimum = MIN_AGY_VERSION) {
   const match = /(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
   if (!match) return true;
   const [major, minor, patch] = match.slice(1).map(Number);
-  const [minMajor, minMinor, minPatch] = MIN_AGY_VERSION.split(".").map(Number);
+  const [minMajor, minMinor, minPatch] = minimum.split(".").map(Number);
   if (major !== minMajor) return major > minMajor;
   if (minor !== minMinor) return minor > minMinor;
   return patch >= minPatch;
@@ -113,7 +113,8 @@ export function buildAgyArgs({
   write,
   model,
   begin = RESPONSE_BEGIN,
-  end = RESPONSE_END
+  end = RESPONSE_END,
+  printTimeout = PRINT_TIMEOUT
 }) {
   const args = [
     "-p",
@@ -124,7 +125,7 @@ export function buildAgyArgs({
     "--add-dir",
     promptDir,
     "--print-timeout",
-    PRINT_TIMEOUT
+    printTimeout
   ];
   if (model) {
     args.push("--model", model);
@@ -145,9 +146,8 @@ export function buildAgyArgs({
     // user's allowlist; it simply buys nothing against file edits. See
     // explainEmptyOutput, which turns that silent denial into a real error.
     //
-    // Callers that need a real read-only guarantee must use isolateWorkspace
-    // (see invokeAntigravity), which denies agy access to the repo by running
-    // it in an empty directory.
+    // isolateWorkspace changes cwd only; a real read-only guarantee requires
+    // filesystem restrictions enforced by the host.
     args.push("--dangerously-skip-permissions");
   }
   return args;
@@ -210,12 +210,13 @@ export function explainEmptyOutput(stderr = "", { canSuggestWrite = false } = {}
 // Invoke agy, capture its response, print it. Resolves { status }. The temp
 // prompt dir is always cleaned up. agy's stderr is passed through so real auth
 // or quota errors stay visible.
-export async function invokeAntigravity({ prompt, model, write, cwd, isolateWorkspace = false }) {
+export async function invokeAntigravity({ prompt, model, write, cwd, isolateWorkspace = false,
+  stdout = process.stdout, stderr = process.stderr,
+  timeoutMs = INVOKE_TIMEOUT_MS, printTimeout = PRINT_TIMEOUT }) {
   const promptDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-prompt-"));
-  // Read-only reviews inline the entire diff into the prompt, so agy needs no
-  // access to the user's repo. Run it in an isolated empty workspace so
-  // read-only is structural — agy literally cannot see or modify the repo —
-  // rather than resting on agy's headless permission behavior.
+  // Reviews inline the diff and use an empty cwd. This reduces incidental
+  // repository access; it is not a filesystem sandbox. Host policy controls
+  // which absolute paths the process can access.
   const workspaceDir = isolateWorkspace
     ? fs.mkdtempSync(path.join(os.tmpdir(), "agy-workspace-"))
     : null;
@@ -237,11 +238,13 @@ export async function invokeAntigravity({ prompt, model, write, cwd, isolateWork
       write,
       model,
       begin: markers.begin,
-      end: markers.end
+      end: markers.end,
+      printTimeout
     });
     const result = await captureCommand(AGY_BINARY, args, {
       cwd: effectiveCwd,
-      timeoutMs: INVOKE_TIMEOUT_MS
+      timeoutMs,
+      handleSignals: true
     });
 
     // Prefer the marker-delimited response (drops agy's tool-use narration). If
@@ -250,8 +253,12 @@ export async function invokeAntigravity({ prompt, model, write, cwd, isolateWork
     // narration and the read-only/marker contract wasn't honored.
     const extracted = extractMarkedResponse(result.stdout, markers.begin, markers.end);
     const answer = extracted ?? result.stdout;
+    if (result.cancelled) {
+      stderr.write(`agy cancelled by ${result.signal}.\n`);
+      return { status: result.status };
+    }
     if (result.timedOut) {
-      process.stderr.write(`agy did not respond within ${PRINT_TIMEOUT}.\n`);
+      stderr.write(`agy did not respond within ${Math.ceil(timeoutMs / 1000)}s.\n`);
       return { status: result.status || 1 };
     }
     // agy exits 0 even when it abandons the response — e.g. a tool needing a
@@ -261,20 +268,20 @@ export async function invokeAntigravity({ prompt, model, write, cwd, isolateWork
     // silence it cannot tell apart from a real result.
     if (!answer || !answer.trim()) {
       if (result.stderr) {
-        process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
+        stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
       }
       const canSuggestWrite = !isolateWorkspace && !write;
-      process.stderr.write(explainEmptyOutput(result.stderr, { canSuggestWrite }));
+      stderr.write(explainEmptyOutput(result.stderr, { canSuggestWrite }));
       return { status: result.status || 1 };
     }
     if (extracted === null && result.stdout) {
-      process.stderr.write(
+      stderr.write(
         "warning: agy did not emit the expected response markers; showing raw output.\n"
       );
     }
-    process.stdout.write(answer.endsWith("\n") ? answer : answer + "\n");
+    stdout.write(answer.endsWith("\n") ? answer : answer + "\n");
     if (result.stderr) {
-      process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
+      stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
     }
     return { status: result.status };
   } finally {
@@ -282,5 +289,33 @@ export async function invokeAntigravity({ prompt, model, write, cwd, isolateWork
     if (workspaceDir) {
       fs.rmSync(workspaceDir, { recursive: true, force: true });
     }
+  }
+}
+
+
+// Explicitly opt-in: unlike detectAuth, this spends a model call and verifies
+// a response through the same file/marker pipeline used by real workflows.
+export async function probeAntigravity() {
+  let answer = "";
+  let diagnostic = "";
+  try {
+    const result = await invokeAntigravity({
+      timeoutMs: 120000,
+      printTimeout: "90s",
+      prompt: "Reply with exactly AGY_SETUP_OK and nothing else. Do not edit files or run commands.",
+      write: false,
+      isolateWorkspace: true,
+      stdout: { write: text => { answer += text; } },
+      stderr: { write: text => { diagnostic += text; } }
+    });
+    const ok = result.status === 0 && answer.trim() === "AGY_SETUP_OK";
+    return {
+      ok,
+      status: ok ? 0 : result.status || 1,
+      detail: ok ? "Live response verified." : diagnostic.trim() ||
+        (result.status ? `agy exited with status ${result.status}.` : "Unexpected live probe response.")
+    };
+  } catch (error) {
+    return { ok: false, status: 1, detail: error.message };
   }
 }

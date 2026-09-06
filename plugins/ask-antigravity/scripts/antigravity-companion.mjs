@@ -16,10 +16,13 @@ import { resolveReviewTarget, collectReviewContext } from "./lib/git.mjs";
 import {
   detectAntigravity,
   detectAuth,
+  probeAntigravity,
   invokeAntigravity,
+  isSupportedVersion,
   installHint,
   MIN_AGY_VERSION
 } from "./lib/agy.mjs";
+import { invokeStaticReview, MIN_REVIEW_AGY_VERSION } from "./lib/static-review.mjs";
 import { buildReviewPrompt, buildAdversarialPrompt } from "./lib/prompts.mjs";
 import {
   renderSetupText,
@@ -79,7 +82,7 @@ export function normalizeArgv(rest) {
 
 async function runSetup(rest) {
   const { options } = parseArgs(rest, {
-    booleanOptions: ["json"]
+    booleanOptions: ["json", "live"]
   });
 
   const state = {
@@ -91,18 +94,27 @@ async function runSetup(rest) {
     state.auth = detectAuth();
   }
 
+  if (options.live) {
+    const { status, ...live } = state.antigravity.installed && state.antigravity.supported
+      ? await probeAntigravity()
+      : { ok: false, status: 1, detail: "Install a supported agy version before running setup --live." };
+    state.live = live;
+    if (!live.ok) process.exitCode = status || 1;
+  }
+
   const output = options.json ? renderSetupJson(state) : renderSetupText(state);
   process.stdout.write(output + "\n");
 }
 
 // Gate every invocation path on an installed, version-supported agy. Returns
 // false (after printing guidance) when invoking would fail or hang.
-function agyUsable() {
+function agyUsable({ review = false } = {}) {
   const agyState = detectAntigravity();
   if (!agyState.installed) {
     process.stdout.write(
-      "Antigravity CLI (agy) is not installed. Run /ask-antigravity:setup to install it.\n"
+      "Antigravity CLI (agy) is not installed. Run the companion setup command for installation guidance.\n"
     );
+    process.exitCode = 1;
     return false;
   }
   if (!agyState.supported) {
@@ -111,6 +123,12 @@ function agyUsable() {
         `${MIN_AGY_VERSION} (headless print mode hangs on older versions). ` +
         `Please upgrade agy — re-run the installer or 'brew upgrade antigravity-cli' — and retry.\n`
     );
+    process.exitCode = 1;
+    return false;
+  }
+  if (review && !isSupportedVersion(agyState.version, MIN_REVIEW_AGY_VERSION)) {
+    process.stderr.write(`Static reviews require agy >= ${MIN_REVIEW_AGY_VERSION} for stream-json stdin. Please upgrade agy.\n`);
+    process.exitCode = 1;
     return false;
   }
   return true;
@@ -122,7 +140,7 @@ async function runReview(rest, { mode }) {
     booleanOptions: ["wait", "background"]
   });
 
-  if (!agyUsable()) {
+  if (!agyUsable({ review: true })) {
     return;
   }
 
@@ -153,9 +171,8 @@ async function runReview(rest, { mode }) {
   process.stdout.write(renderReviewHeader({ summary: context.summary, target, mode }));
 
   const model = resolveModelAlias(options.model) ?? DEFAULT_REVIEW_MODEL;
-  // Reviews are read-only and the whole diff is already in the prompt, so run
-  // agy in an isolated workspace — it never touches the repo being reviewed.
-  const result = await invokeAntigravity({ prompt, model, write: false, cwd, isolateWorkspace: true });
+  // Supply the entire review through stdin; host policy enforces filesystem access.
+  const result = await invokeStaticReview({ prompt, model });
   if (result.status !== 0) {
     process.exit(result.status || 1);
   }
@@ -207,7 +224,10 @@ async function runTask(rest) {
 // Only run main() when this file is the entry point. Without this guard,
 // importing it from tests or other tooling re-runs the CLI dispatcher and
 // exits the host process before the import completes.
-const invokedAsCli = process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url);
+// macOS temp/cache paths can be reached through /var -> /private/var aliases.
+// Node resolves the module URL; compare canonical paths rather than spellings.
+const invokedAsCli = process.argv[1] && fs.existsSync(process.argv[1]) &&
+  fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
 if (invokedAsCli) {
   main().catch((error) => {
     process.stdout.write(renderError(error) + "\n");

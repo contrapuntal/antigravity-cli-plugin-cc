@@ -95,3 +95,17 @@ test("live: print-mode --model accepts a display name", { skip }, () => {
   assert.match(result.stdout, /PONG/);
   assert.ok(!/not supported|ignored/i.test(result.stderr), result.stderr);
 });
+
+test("live: static review delivers stdin and returns a final response", { skip }, async () => {
+  const { invokeStaticReview } = await import('../plugins/ask-antigravity/scripts/lib/static-review.mjs');
+  let answer = '';
+  let detail = '';
+  const result = await invokeStaticReview({
+    prompt: 'Review this JavaScript regression: sum(a,b) previously returned a+b; now it returns a-b. Intended behavior is addition. Explain the defect.',
+    model: process.env.AGY_LIVE_MODEL,
+    stdout: {write: text => { answer += text; }},
+    stderr: {write: text => { detail += text; }}
+  });
+  assert.equal(result.status, 0, detail);
+  assert.match(answer, /subtract|difference|a\s*-\s*b/i);
+});

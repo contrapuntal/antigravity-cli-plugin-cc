@@ -220,3 +220,72 @@ test("streamCommand returns nonzero status when child is signaled", async () => 
   );
   assert.ok(result.signal, "signal name must be reported");
 });
+
+// Reproduce cancellation in a separate Node process so the test runner never
+// receives the signal and the companion's exit status is observable.
+for (const scenario of ["completed", "graceful", "stubborn"]) {
+  test(`cancellation handles ${scenario} child correctly`, { skip: process.platform === "win32" }, async () => {
+    const { default: fs } = await import("node:fs");
+    const { default: os } = await import("node:os");
+    const { default: path } = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "capture-cancel-"));
+    const moduleUrl = new URL("../plugins/ask-antigravity/scripts/lib/process.mjs", import.meta.url).href;
+    const worker = `
+      const fs = require('node:fs');
+      if (${JSON.stringify(scenario)} === 'completed') {
+        const {spawn} = require('node:child_process');
+        spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:'inherit'});
+        console.log('COMPLETE ANSWER');
+      } else {
+        process.on('SIGTERM', () => {
+          if (${JSON.stringify(scenario)} === 'graceful') {
+            fs.writeFileSync(${JSON.stringify(path.join(dir, "cleanup"))}, 'done');
+            process.exit(0);
+          }
+        });
+      }
+      fs.writeFileSync(${JSON.stringify(path.join(dir, "pid"))}, String(process.pid));
+      if (${JSON.stringify(scenario)} === 'completed') process.exit(0);
+      setInterval(()=>{},1000);
+    `;
+    const runner = `
+      import fs from 'node:fs';
+      import {captureCommand} from ${JSON.stringify(moduleUrl)};
+      const pending = captureCommand(process.execPath, ['-e', ${JSON.stringify(worker)}],
+        {handleSignals:true, timeoutMs:5000, killGraceMs:100});
+      const poll = setInterval(() => {
+        if (!fs.existsSync(${JSON.stringify(path.join(dir, "pid"))})) return;
+        const pid = Number(fs.readFileSync(${JSON.stringify(path.join(dir, "pid"))}, 'utf8'));
+        if (${JSON.stringify(scenario)} === 'completed') {
+          try { process.kill(pid, 0); return; } catch (error) { if(error.code !== 'ESRCH') throw error; }
+        }
+        clearInterval(poll);
+        process.kill(process.pid, 'SIGINT');
+      }, 10);
+      const result = await pending;
+      clearInterval(poll);
+      console.log(JSON.stringify(result));
+    `;
+    try {
+      const run = spawnSync(process.execPath, ["--input-type=module", "-e", runner], {encoding:"utf8", timeout:8000});
+      assert.ifError(run.error);
+      const result = JSON.parse(run.stdout);
+      assert.equal(run.status, 0, "process helper must not change its caller exit code");
+      if (scenario === "completed") {
+        assert.equal(run.status, 0, "late cancellation must not rewrite a completed exit");
+        assert.equal(result.status, 0);
+        assert.ok(!result.cancelled);
+        assert.equal(result.stdout, "COMPLETE ANSWER\n");
+      } else {
+        assert.equal(result.status, 130, "a cancelled child exiting 0 is still cancelled");
+        assert.equal(result.cancelled, true);
+        if (scenario === "graceful") assert.ok(fs.existsSync(path.join(dir, "cleanup")), "SIGTERM handler must run before forced kill");
+      }
+    } finally {
+      if (fs.existsSync(path.join(dir, "pid"))) {
+        try { process.kill(-Number(fs.readFileSync(path.join(dir,"pid"), "utf8")), "SIGKILL"); } catch {}
+      }
+      fs.rmSync(dir, {recursive:true, force:true});
+    }
+  });
+}

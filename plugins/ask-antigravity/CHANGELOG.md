@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.0
+
+- Send review context over stream-json stdin (agy 1.1.15+), request static analysis without tools, and report structured failures instead of accepting empty success
+
+- Preserve completed responses on late cancellation; send SIGTERM before forced termination and keep exit-code ownership in the dispatcher
+- Bound live setup checks to two minutes and clarify local authentication evidence versus live readiness
+- Cover live text rendering and report when a probe could not run
+
+- Add native Codex plugin and repository marketplace packaging with setup, review, adversarial-review, and rescue skills
+- Resolve the bundled companion relative to installed skills; native Codex installation needs no root environment variable
+- Use foreground Codex execution with session polling, safely quoted arguments, and temporary prompt files for rescue
+- Add opt-in `setup --live` connectivity checks, including separate live results with `--json`
+- Terminate the active agy process group on companion cancellation and clean temporary workspaces
+- Handle symlinked cache paths on macOS and suppress incompatible Claude command migration in Codex
+- Return failure for missing or unsupported agy during invocation and use host-neutral setup guidance
+- Clarify analysis/write intent, host filesystem restrictions, and OAuth permission requirements
+
 ## 1.1.2
 
 - Fail loudly when agy returns an empty answer in headless mode due to auto-denied tool permissions instead of silently reporting success
