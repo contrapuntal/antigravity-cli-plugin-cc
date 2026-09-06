@@ -1,11 +1,21 @@
-# Antigravity plugin for Claude Code and Codex
+# Ask Antigravity
 
-Run Antigravity from inside Claude Code or Codex for code reviews and delegated tasks.
+Run Antigravity from Claude Code, Codex, or Copilot CLI for code reviews and delegated tasks.
 
 This plugin lets coding-agent users reach Antigravity without leaving their workflow. It adapts [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) to the Antigravity CLI (`agy`) runtime model.
 
 > [!IMPORTANT]
 > **This wraps the Antigravity *CLI*, not the Antigravity IDE.** "Antigravity" names several Google products. This plugin drives `agy`, the standalone command-line binary — it does not connect to or control the Antigravity app or the Antigravity IDE, which have no programmatic interface. Having the GUI installed is neither sufficient (you still need `agy` on your PATH) nor required (the CLI works on its own).
+
+## Repository rename
+
+The repository is now `contrapuntal/ask-antigravity` (formerly `contrapuntal/antigravity-cli-plugin-cc`). Existing clones can update their remote:
+
+```bash
+git remote set-url origin git@github.com:contrapuntal/ask-antigravity.git
+```
+
+The Claude Code and Codex plugin ID remains `ask-antigravity`, and the marketplace remains `contrapuntal`. The Copilot plugin keeps its existing `antigravity-cli-plugin-cc` ID for compatibility; its display name is now **Ask Antigravity**. The portable helper keeps `ANTIGRAVITY_CLI_PLUGIN_CC_ROOT`, so existing configurations continue to work. Your local checkout directory does not need to be renamed.
 
 ## Claude Code commands
 
@@ -52,7 +62,7 @@ You need a working Antigravity CLI on your machine **before** installing this pl
 Add the marketplace, install the plugin, reload:
 
 ```bash
-/plugin marketplace add contrapuntal/antigravity-cli-plugin-cc
+/plugin marketplace add contrapuntal/ask-antigravity
 /plugin install ask-antigravity@contrapuntal
 /reload-plugins
 ```
@@ -222,7 +232,7 @@ You lose the slash-command UX in these agents, but the capability remains reacha
 ### Copilot CLI
 
 ```bash
-copilot plugin install contrapuntal/antigravity-cli-plugin-cc
+copilot plugin install contrapuntal/ask-antigravity
 ```
 
 This installs the `antigravity-helper` skill (declared in `.plugin/plugin.json`), which is the Copilot surface — invoke it by describing the review or delegation task. The `antigravity-rescue` subagent is a Claude Code plugin component and is not loaded by Copilot; under Copilot, use the skill instead.

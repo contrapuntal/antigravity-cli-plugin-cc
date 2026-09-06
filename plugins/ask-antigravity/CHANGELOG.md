@@ -2,6 +2,8 @@
 
 ## 1.2.0
 
+- Rename the repository and display branding to Ask Antigravity; preserve plugin IDs, marketplace identity, and the portable helper environment variable
+
 - Send review context over stream-json stdin (agy 1.1.15+), request static analysis without tools, and report structured failures instead of accepting empty success
 
 - Preserve completed responses on late cancellation; send SIGTERM before forced termination and keep exit-code ownership in the dispatcher

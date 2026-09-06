@@ -1,13 +1,13 @@
 {
   "name": "antigravity-cli-plugin-cc",
-  "displayName": "Antigravity Helper",
-  "description": "Run Antigravity from inside Copilot CLI for code reviews and delegated tasks. Wraps the antigravity-cli-plugin-cc companion script.",
+  "displayName": "Ask Antigravity",
+  "description": "Run Antigravity from inside Copilot CLI for code reviews and delegated tasks. Wraps the ask-antigravity companion script.",
   "version": "1.2.0",
   "author": {
-    "name": "antigravity-cli-plugin-cc contributors"
+    "name": "ask-antigravity contributors"
   },
   "license": "Apache-2.0",
-  "homepage": "https://github.com/contrapuntal/antigravity-cli-plugin-cc",
-  "repository": "https://github.com/contrapuntal/antigravity-cli-plugin-cc",
+  "homepage": "https://github.com/contrapuntal/ask-antigravity",
+  "repository": "https://github.com/contrapuntal/ask-antigravity",
   "skills": "./skills/"
 }

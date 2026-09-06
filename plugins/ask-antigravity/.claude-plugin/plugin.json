@@ -3,6 +3,6 @@
   "version": "1.2.0",
   "description": "Use Antigravity from Claude Code to review code or delegate tasks.",
   "author": {
-    "name": "antigravity-cli-plugin-cc contributors"
+    "name": "ask-antigravity contributors"
   }
 }

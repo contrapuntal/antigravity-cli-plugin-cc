@@ -3,14 +3,14 @@
   "version": "1.2.0",
   "description": "Use Antigravity from Codex to review code and delegate tasks.",
   "author": {
-    "name": "antigravity-cli-plugin-cc contributors"
+    "name": "ask-antigravity contributors"
   },
   "skills": "./codex-skills/",
   "interface": {
     "displayName": "Ask Antigravity",
     "shortDescription": "Antigravity reviews and delegated tasks.",
     "longDescription": "Run the Antigravity CLI from Codex for code reviews, adversarial reviews, setup checks, and delegated tasks.",
-    "developerName": "antigravity-cli-plugin-cc contributors",
+    "developerName": "ask-antigravity contributors",
     "category": "Productivity",
     "capabilities": [],
     "defaultPrompt": [
